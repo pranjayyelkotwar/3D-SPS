@@ -9,7 +9,9 @@ import regex as re
 
 @lru_cache()
 def default_bpe():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "../data", "bpe_simple_vocab_16e6.txt.gz")
+    this_dir = os.path.dirname(os.path.abspath(__file__))  # dir containing this file
+    parent = os.path.dirname(this_dir)                     # parent dir
+    return os.path.join(parent, "data", "bpe_simple_vocab_16e6.txt.gz")
 
 
 @lru_cache()
@@ -63,6 +65,7 @@ class SimpleTokenizer(object):
     def __init__(self, bpe_path: str = default_bpe()):
         self.byte_encoder = bytes_to_unicode()
         self.byte_decoder = {v: k for k, v in self.byte_encoder.items()}
+        # print(bpe_path)
         merges = gzip.open(bpe_path).read().decode("utf-8").split('\n')
         merges = merges[1:49152-256-2+1]
         merges = [tuple(merge.split()) for merge in merges]

@@ -2,12 +2,12 @@ GENERAL:
   manual_seed: 3407
   tag: default
   gpu: '0'
-  debug: False
+  debug: True
   distribute: False
 
 PATH:
-  root_path: ''
-  scannet_data_folder: ''
+  root_path: '/nas_hcfc/pranjay/3D-SPS'
+  scannet_data_folder: '/nas_hcfc/pranjay/3D-SPS/data/scannet/scannet_data'
   scanref_data_root: ''
 
 DATA:
@@ -22,7 +22,7 @@ DATA:
   use_height: False
   use_color: True
   use_normal: True
-  use_multiview: True
+  use_multiview: False
   fuse_multi_mode: late   # early or late
 
 
@@ -79,7 +79,7 @@ MODEL:
 
   # pretrain
   use_pretrained: True
-  pretrain_path: ''
+  pretrain_path: 'data/xyz_rgb_norm_backbone.pth'
   trans_pre_model: False
 
 LOSS:
@@ -99,7 +99,7 @@ LOSS:
   heading_delta: 1
 
 TRAIN:
-  batch_size: 32
+  batch_size: 2
   num_workers: 0
   epoch: 32
 

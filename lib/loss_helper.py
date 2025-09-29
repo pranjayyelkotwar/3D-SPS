@@ -24,6 +24,15 @@ REF_WEIGHTS = [0.1, 0.9]
 
 
 def compute_kps_loss(data_dict, topk, args):
+    """ 
+    Compute keypoint sampling loss for object detection.
+    
+    This function:
+    - Looks at ALL boxes in the scene (not just reference box)
+    - Optimizes seed points to be closer to ground truth object centers
+    - Selects top-k closest seed points for each GT box
+    - Applies focal classification loss for objectness prediction
+    """
     box_label_mask = data_dict['box_label_mask']
     seed_inds = data_dict['seed_inds'].long()  # B, K
     seed_xyz = data_dict['seed_xyz']  # B, K, 3

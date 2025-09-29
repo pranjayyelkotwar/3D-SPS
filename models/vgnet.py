@@ -10,6 +10,7 @@ from models.lang_module import GruLayer, ClipModule
 from models.sample_model import SamplingModule
 from models.transformer import *
 from models.mlp import MLP
+from models.projector_3d import Projector3D
 
 class VGNet(nn.Module):
 
@@ -120,6 +121,14 @@ class VGNet(nn.Module):
                     use_objectness=self.args.use_objectness,
                     args=self.args))
         
+        # Projector for contrastive learning (experimental)
+        # Map both object and language features to similar embedding space
+        self.projector = Projector3D(
+            object_dim=self.args.transformer_feat_dim, 
+            lang_dim=self.args.transformer_feat_dim, 
+            out_dim=512
+        )
+        
         # Init
         self.init_weights()
         self.init_bn_momentum()
@@ -202,6 +211,14 @@ class VGNet(nn.Module):
         # Position Embedding for lang
         if self.args.lang_position_embedding == 'none':
             lang_pos = None
+        
+        # Experimental: Project object and language features to similar embedding space
+        # This is for contrastive learning between 3D objects and text descriptions
+        projected_features = self.projector(object_feat=object_feat, lang_feat=lang_feat)
+        
+        # Store projected features in data_dict for contrastive loss computation
+        data_dict['projected_object_feat'] = projected_features['object']  # [B, n_proposal, 512]
+        data_dict['projected_lang_feat'] = projected_features['lang']      # [B, n_word, 512]
         
         input_object_feat = object_feat
         input_lang_feat = lang_feat

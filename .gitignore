@@ -9,6 +9,7 @@ data/scannet/scannet*/
 data/enet_features
 data/frames_square
 data/scannetv2_enet.pth
+data/xyz_rgb_norm_backbone.pth
 
 # cache
 data/scannet/__pycache__

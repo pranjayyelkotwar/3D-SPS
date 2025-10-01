@@ -15,6 +15,7 @@ sys.path.append(os.path.join(os.getcwd(), "lib")) # HACK add the lib folder
 from utils.nn_distance import nn_distance, huber_loss
 from lib.ap_helper import parse_predictions
 from lib.loss import SoftmaxRankingLoss, SigmoidFocalClassificationLoss, l1_loss, smoothl1_loss
+from lib.contrastive_loss import ContrastiveLoss
 from utils.box_util import get_3d_box, get_3d_box_batch, box3d_iou, box3d_iou_batch
 
 FAR_THRESHOLD = 0.6
@@ -444,6 +445,132 @@ def compute_lang_classification_loss(data_dict, num_decoder_layers, args):
     return loss
 
 
+def compute_contrastive_loss(data_dict, num_decoder_layers, args):
+    """Compute contrastive loss between text and 3D proposals.
+    
+    Args:
+        data_dict: dict containing model outputs and ground truth data
+        num_decoder_layers: number of decoder layers
+        args: arguments containing contrastive loss parameters
+        
+    Returns:
+        contrastive_loss: pytorch scalar tensor
+        data_dict: updated data_dict with contrastive loss info
+    """
+    # Check if contrastive learning is enabled
+    if not getattr(args, 'use_contrastive_loss', False):
+        return torch.zeros(1)[0].cuda(), data_dict
+    
+    # Get contrastive loss parameters from args
+    contrastive_params = {
+        'temperature': getattr(args, 'contrastive_temperature', 0.07),
+        'positive_selection': getattr(args, 'contrastive_positive_selection', 'iou_threshold'),
+        'iou_threshold': getattr(args, 'contrastive_iou_threshold', 0.25),
+        'top_k1': getattr(args, 'contrastive_top_k1', 5),
+        'top_k2': getattr(args, 'contrastive_top_k2', 32),
+        'weighting': getattr(args, 'contrastive_weighting', 'uniform'),
+        'sigma': getattr(args, 'contrastive_sigma', 1.0),
+        'symmetric': getattr(args, 'contrastive_symmetric', False)
+    }
+    
+    # Initialize contrastive loss
+    criterion = ContrastiveLoss(**contrastive_params)
+    
+    # Determine which decoder stage to use
+    if args.ref_each_stage:
+        prefixes = [f'{i}head_' for i in range(num_decoder_layers - 1)] + ['last_']
+    else:
+        prefixes = ['last_']  # only final stage
+    
+    total_loss = 0.0
+    contrastive_info = {}
+    
+    for prefix in prefixes:
+        # Extract required data from data_dict
+        try:
+            # Text embeddings (assumed to be in data_dict)
+            if f'{prefix}text_embeddings' in data_dict:
+                text_embeddings = data_dict[f'{prefix}text_embeddings']  # [B, D]
+            elif 'text_embeddings' in data_dict:
+                text_embeddings = data_dict['text_embeddings']  # [B, D]
+            else:
+                # Skip if no text embeddings available
+                continue
+            
+            # Proposal embeddings (from model outputs)
+            if f'{prefix}proposal_embeddings' in data_dict:
+                proposal_embeddings = data_dict[f'{prefix}proposal_embeddings']  # [N, D]
+            elif f'{prefix}aggregated_vote_features' in data_dict:
+                proposal_embeddings = data_dict[f'{prefix}aggregated_vote_features']  # [B, K, D]
+                # Reshape to [B*K, D] if needed
+                if len(proposal_embeddings.shape) == 3:
+                    B, K, D = proposal_embeddings.shape
+                    proposal_embeddings = proposal_embeddings.view(B*K, D)
+            else:
+                # Skip if no proposal embeddings available
+                continue
+            
+            # Ground truth boxes
+            gt_boxes = data_dict['ref_center_label']  # [B, 3] centers
+            if 'ref_size_gts' in data_dict:
+                gt_sizes = data_dict['ref_size_gts']  # [B, 3] sizes
+                gt_boxes = torch.cat([gt_boxes, gt_sizes], dim=-1)  # [B, 6]
+            else:
+                # Use default size if not available
+                gt_boxes = torch.cat([gt_boxes, torch.ones_like(gt_boxes)], dim=-1)  # [B, 6]
+            
+            # Proposal boxes
+            proposal_centers = data_dict[f'{prefix}center']  # [B, K, 3]
+            if f'{prefix}size_residuals' in data_dict and f'{prefix}size_scores' in data_dict:
+                # Reconstruct proposal sizes from predictions
+                pred_size_class = torch.argmax(data_dict[f'{prefix}size_scores'], -1)  # [B, K]
+                pred_size_residual = torch.gather(data_dict[f'{prefix}size_residuals'], 2, 
+                                                pred_size_class.unsqueeze(-1).unsqueeze(-1).repeat(1,1,1,3))  # [B, K, 1, 3]
+                pred_size_residual = pred_size_residual.squeeze(2)  # [B, K, 3]
+                
+                # Use a simple size estimation (this should ideally use the config's mean_size_arr)
+                proposal_sizes = torch.ones_like(proposal_centers) + pred_size_residual
+            else:
+                # Use default size if not available
+                proposal_sizes = torch.ones_like(proposal_centers)
+            
+            # Reshape proposal boxes to [B*K, 6]
+            B, K = proposal_centers.shape[:2]
+            proposal_boxes = torch.cat([proposal_centers, proposal_sizes], dim=-1)  # [B, K, 6]
+            proposal_boxes = proposal_boxes.view(B*K, 6)  # [B*K, 6]
+            
+            # Scene IDs (assume single scene per batch for now)
+            text_scene_ids = torch.arange(B, device=text_embeddings.device)  # [B]
+            proposal_scene_ids = torch.arange(B, device=text_embeddings.device).repeat_interleave(K)  # [B*K]
+            
+            # Compute contrastive loss
+            loss, info = criterion(
+                text_embeddings=text_embeddings,
+                proposal_embeddings=proposal_embeddings,
+                gt_boxes=gt_boxes,
+                proposal_boxes=proposal_boxes,
+                text_scene_ids=text_scene_ids,
+                proposal_scene_ids=proposal_scene_ids
+            )
+            
+            total_loss += loss
+            contrastive_info[f'{prefix}contrastive_info'] = info
+            
+        except (KeyError, RuntimeError) as e:
+            # Skip this prefix if required data is not available
+            print(f"Warning: Skipping contrastive loss for {prefix} due to missing data: {e}")
+            continue
+    
+    # Average over prefixes
+    if len(prefixes) > 0:
+        total_loss = total_loss / len(prefixes)
+    
+    # Store contrastive loss info in data_dict for monitoring
+    data_dict['contrastive_info'] = contrastive_info
+    
+    return total_loss, data_dict
+
+
 def get_loss(data_dict, config, args):
     """ Loss functions
 
@@ -505,13 +632,21 @@ def get_loss(data_dict, config, args):
         data_dict['ref_mask_loss'] = compute_ref_mask_loss(data_dict, num_decoder_layers, args)
     else:
         data_dict['ref_mask_loss'] = torch.zeros(1)[0].cuda()
+    
+    # Contrastive loss
+    if getattr(args, 'use_contrastive_loss', False):
+        contrastive_loss, data_dict = compute_contrastive_loss(data_dict, num_decoder_layers, args)
+        data_dict['contrastive_loss'] = contrastive_loss
+    else:
+        data_dict['contrastive_loss'] = torch.zeros(1)[0].cuda()
         
     # Final loss function
     loss = args.kps_loss_weight * data_dict['kps_loss'] \
            + args.det_loss_weight * (0.1*data_dict['objectness_loss'] + data_dict['box_loss'] + 0.1*data_dict['sem_cls_loss']) / (args.num_decoder_layers + 1) \
            + 0.1*data_dict["ref_loss"] \
            + 0.1*data_dict["lang_cls_loss"] \
-           + 0.1*data_dict['ref_mask_loss']
+           + 0.1*data_dict['ref_mask_loss'] \
+           + getattr(args, 'contrastive_loss_weight', 0.1) * data_dict['contrastive_loss']
     
     loss *= 10 # amplify
 

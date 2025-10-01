@@ -14,6 +14,14 @@ from tensorboardX import SummaryWriter
 from torch.optim.lr_scheduler import StepLR, MultiStepLR
 import torch.nn as nn
 from data.scannet.model_util_scannet import ScannetDatasetConfig
+
+# Wandb import with fallback
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not available. Install with 'pip install wandb' for experiment tracking.")
 sys.path.append(os.path.join(os.getcwd(), "lib")) # HACK add the lib folder
 from lib.ap_helper import APCalculator, parse_predictions, parse_groundtruths, parse_ref_predictions, \
     parse_ref_groundtruths
@@ -30,6 +38,7 @@ ITER_REPORT_TEMPLATE = """
 [loss] train_ref_loss: {train_ref_loss}
 [loss] train_ref_mask_loss: {train_ref_mask_loss}
 [loss] train_lang_cls_loss: {train_lang_cls_loss}
+[loss] train_contrastive_loss: {train_contrastive_loss}
 [loss] train_objectness_loss: {train_objectness_loss}
 [loss] train_kps_loss: {train_kps_loss}
 [loss] train_box_loss: {train_box_loss}
@@ -53,6 +62,7 @@ EPOCH_REPORT_TEMPLATE = """
 [train] train_ref_loss: {train_ref_loss}
 [train] train_ref_mask_loss: {train_ref_mask_loss}
 [train] train_lang_cls_loss: {train_lang_cls_loss}
+[train] train_contrastive_loss: {train_contrastive_loss}
 [train] train_objectness_loss: {train_objectness_loss}
 [train] train_kps_loss: {train_kps_loss}
 [train] train_box_loss: {train_box_loss}
@@ -66,6 +76,7 @@ EPOCH_REPORT_TEMPLATE = """
 [val]   val_ref_loss: {val_ref_loss}
 [val]   val_ref_mask_loss: {val_ref_mask_loss}
 [val]   val_lang_cls_loss: {val_lang_cls_loss}
+[val]   val_contrastive_loss: {val_contrastive_loss}
 [val]   val_objectness_loss: {val_objectness_loss}
 [val]   val_kps_loss: {val_kps_loss}
 [val]   val_box_loss: {val_box_loss}
@@ -84,6 +95,7 @@ BEST_REPORT_TEMPLATE = """
 [loss] ref_loss: {ref_loss}
 [loss] ref_mask_loss: {ref_mask_loss}
 [loss] lang_cls_loss: {lang_cls_loss}
+[loss] contrastive_loss: {contrastive_loss}
 [loss] objectness_loss: {objectness_loss}
 [loss] kps_loss: {kps_loss}
 [loss] box_loss: {box_loss}
@@ -99,7 +111,8 @@ BEST_REPORT_TEMPLATE = """
 class Solver():
     def __init__(self, model, data_config, dataloader, optimizer, stamp, val_freq=1, args=None,
     detection=True, reference=True, use_lang_classifier=True,
-    lr_decay_step=None, lr_decay_rate=None, bn_decay_step=None, bn_decay_rate=None, distributed_rank=None):
+    lr_decay_step=None, lr_decay_rate=None, bn_decay_step=None, bn_decay_rate=None, distributed_rank=None,
+    use_wandb=True, wandb_project=None, wandb_run_name=None, wandb_config=None):
 
         self.epoch = 0                    # set in __call__
         self.verbose = 0                  # set in __call__
@@ -127,6 +140,7 @@ class Solver():
             "ref_loss": float("inf"),
             "ref_mask_loss": float("inf"),
             "lang_cls_loss": float("inf"),
+            "contrastive_loss": float("inf"),
             "objectness_loss": float("inf"),
             "kps_loss": float("inf"),
             "box_loss": float("inf"),
@@ -141,6 +155,27 @@ class Solver():
             "det_mAP_0.25": -float("inf"),
             "det_mAP_0.5": -float("inf")
         }
+        
+        # Wandb configuration
+        self.use_wandb = use_wandb and WANDB_AVAILABLE
+        if self.use_wandb and not distributed_rank:  # Only initialize on main process
+            # Initialize wandb
+            wandb_config_dict = wandb_config if wandb_config else {}
+            if hasattr(args, '__dict__'):
+                wandb_config_dict.update(vars(args))
+            
+            wandb.init(
+                project=wandb_project or "3d-sps-training",
+                name=wandb_run_name or f"run_{stamp}",
+                config=wandb_config_dict,
+                dir=os.path.join(CONF.PATH.OUTPUT, stamp) if hasattr(CONF, 'PATH') else None,
+                tags=["3d-visual-grounding", "contrastive-learning"] if getattr(args, 'use_contrastive_loss', False) else ["3d-visual-grounding"]
+            )
+            
+            # Watch model for gradients and parameters
+            wandb.watch(model, log="all", log_freq=100)
+        elif self.use_wandb and distributed_rank:
+            print(f"Wandb disabled for distributed rank {distributed_rank} (only main process logs)")
 
         # init log
         # contains all necessary info for all phases
@@ -269,6 +304,7 @@ class Solver():
             "ref_loss": [],
             "ref_mask_loss": [],
             "lang_cls_loss": [],
+            "contrastive_loss": [],
             "objectness_loss": [],
             "kps_loss": [],
             "box_loss": [],
@@ -313,6 +349,7 @@ class Solver():
         self._running_log["ref_loss"] = data_dict["ref_loss"]
         self._running_log["ref_mask_loss"] = data_dict["ref_mask_loss"]
         self._running_log["lang_cls_loss"] = data_dict["lang_cls_loss"]
+        self._running_log["contrastive_loss"] = data_dict["contrastive_loss"]
         self._running_log["objectness_loss"] = data_dict["objectness_loss"]
         self._running_log["kps_loss"] = data_dict["kps_loss"]
         self._running_log["box_loss"] = data_dict["box_loss"]
@@ -343,6 +380,7 @@ class Solver():
             "ref_loss": 0,
             "ref_mask_loss": 0,
             "lang_cls_loss": 0,
+            "contrastive_loss": 0,
             "objectness_loss": 0,
             "kps_loss": 0,
             "box_loss": 0,
@@ -361,6 +399,7 @@ class Solver():
         self.log[phase]["ref_loss"].append(self._running_log["ref_loss"].item())
         self.log[phase]["ref_mask_loss"].append(self._running_log["ref_mask_loss"].item())
         self.log[phase]["lang_cls_loss"].append(self._running_log["lang_cls_loss"].item())
+        self.log[phase]["contrastive_loss"].append(self._running_log["contrastive_loss"].item())
         self.log[phase]["objectness_loss"].append(self._running_log["objectness_loss"].item())
         self.log[phase]["kps_loss"].append(self._running_log["kps_loss"].item())
         self.log[phase]["box_loss"].append(self._running_log["box_loss"].item())
@@ -487,6 +526,7 @@ class Solver():
             self.best["ref_loss"] = np.mean(self.log[phase]["ref_loss"])
             self.best["ref_mask_loss"] = np.mean(self.log[phase]["ref_mask_loss"])
             self.best["lang_cls_loss"] = np.mean(self.log[phase]["lang_cls_loss"])
+            self.best["contrastive_loss"] = np.mean(self.log[phase]["contrastive_loss"])
             self.best["objectness_loss"] = np.mean(self.log[phase]["objectness_loss"])
             self.best["kps_loss"] = np.mean(self.log[phase]["kps_loss"])
             self.best["box_loss"] = np.mean(self.log[phase]["box_loss"])
@@ -500,6 +540,14 @@ class Solver():
             self.best["iou_rate_0.5"] = np.mean(self.log[phase]["iou_rate_0.5"])
             self.best["det_mAP_0.25"] = np.mean(self.log[phase]["det_mAP_0.25"])
             self.best["det_mAP_0.5"] = np.mean(self.log[phase]["det_mAP_0.5"])
+            
+            # Log best metrics to wandb
+            if self.use_wandb:
+                wandb.log({
+                    "best_epoch": self.best["epoch"],
+                    "best_iou_rate_0.5": self.best["iou_rate_0.5"],
+                    "best_loss": self.best["loss"]
+                }, step=self._global_epoch_id)
 
             # save model
             self._log("saving best models...\n")
@@ -509,11 +557,11 @@ class Solver():
     def _dump_log(self, phase):
         log = {
             "train": {
-                "loss": ["loss", "ref_loss", "ref_mask_loss", "lang_cls_loss", "objectness_loss", "kps_loss", "box_loss", "sem_cls_loss"],
+                "loss": ["loss", "ref_loss", "ref_mask_loss", "lang_cls_loss", "contrastive_loss", "objectness_loss", "kps_loss", "box_loss", "sem_cls_loss"],
                 "score": ["lang_cls_acc", "ref_acc", "obj_acc", "pos_ratio", "neg_ratio", "iou_rate_0.25", "iou_rate_0.5"]
             },
             'val': {
-                "loss": ["loss", "ref_loss", "ref_mask_loss", "lang_cls_loss", "objectness_loss", "kps_loss", "box_loss", "sem_cls_loss"],
+                "loss": ["loss", "ref_loss", "ref_mask_loss", "lang_cls_loss", "contrastive_loss", "objectness_loss", "kps_loss", "box_loss", "sem_cls_loss"],
                 "score": ["lang_cls_acc", "ref_acc", "obj_acc", "pos_ratio", "neg_ratio", "iou_rate_0.25", "iou_rate_0.5", "det_mAP_0.25", "det_mAP_0.5"]
             }
         }
@@ -524,13 +572,39 @@ class Solver():
         if self.distributed_rank:
             if self.distributed_rank != 0:
                 return
+        
+        # Tensorboard logging
         for key in log[phase]:
             for item in log[phase][key]:
+                metric_value = np.mean([v for v in self.log[phase][item]])
                 self._log_writer[phase].add_scalar(
                     "{}/{}".format(key, item),
-                    np.mean([v for v in self.log[phase][item]]),
+                    metric_value,
                     index[phase]
                 )
+        
+        # Wandb logging
+        if self.use_wandb and phase == "train":  # Log training metrics every iteration
+            wandb_dict = {}
+            for key in log[phase]:
+                for item in log[phase][key]:
+                    metric_value = np.mean([v for v in self.log[phase][item]])
+                    wandb_dict[f"{phase}_{item}"] = metric_value
+            
+            # Add learning rate and other training info
+            if hasattr(self, 'lr_scheduler') and self.lr_scheduler:
+                wandb_dict["learning_rate"] = self.lr_scheduler.get_last_lr()[0] if hasattr(self.lr_scheduler, 'get_last_lr') else self.lr_scheduler.get_lr()[0]
+            
+            wandb.log(wandb_dict, step=index[phase])
+        
+        elif self.use_wandb and phase == "val":  # Log validation metrics at end of epoch
+            wandb_dict = {}
+            for key in log[phase]:
+                for item in log[phase][key]:
+                    metric_value = np.mean([v for v in self.log[phase][item]])
+                    wandb_dict[f"{phase}_{item}"] = metric_value
+            
+            wandb.log(wandb_dict, step=self._global_epoch_id)
 
     def _finish(self, epoch_id):
         # print best
@@ -554,6 +628,10 @@ class Solver():
         # export
         for phase in ["train", "val"]:
             self._log_writer[phase].export_scalars_to_json(os.path.join(CONF.PATH.OUTPUT, self.stamp, "tensorboard/{}".format(phase), "all_scalars.json"))
+        
+        # Finish wandb run
+        if self.use_wandb:
+            wandb.finish()
 
     def _train_report(self, epoch_id):
         # compute ETA
@@ -578,6 +656,7 @@ class Solver():
             train_ref_loss=round(np.mean([v for v in self.log["train"]["ref_loss"]]), 5),
             train_ref_mask_loss=round(np.mean([v for v in self.log["train"]["ref_mask_loss"]]), 5),
             train_lang_cls_loss=round(np.mean([v for v in self.log["train"]["lang_cls_loss"]]), 5),
+            train_contrastive_loss=round(np.mean([v for v in self.log["train"]["contrastive_loss"]]), 5),
             train_objectness_loss=round(np.mean([v for v in self.log["train"]["objectness_loss"]]), 5),
             train_kps_loss=round(np.mean([v for v in self.log["train"]["kps_loss"]]), 5),
             train_box_loss=round(np.mean([v for v in self.log["train"]["box_loss"]]), 5),
@@ -607,6 +686,7 @@ class Solver():
             train_ref_loss=round(np.mean([v for v in self.log["train"]["ref_loss"]]), 5),
             train_ref_mask_loss=round(np.mean([v for v in self.log["train"]["ref_mask_loss"]]), 5),
             train_lang_cls_loss=round(np.mean([v for v in self.log["train"]["lang_cls_loss"]]), 5),
+            train_contrastive_loss=round(np.mean([v for v in self.log["train"]["contrastive_loss"]]), 5),
             train_objectness_loss=round(np.mean([v for v in self.log["train"]["objectness_loss"]]), 5),
             train_kps_loss=round(np.mean([v for v in self.log["train"]["kps_loss"]]), 5),
             train_box_loss=round(np.mean([v for v in self.log["train"]["box_loss"]]), 5),
@@ -622,6 +702,7 @@ class Solver():
             val_ref_loss=round(np.mean([v for v in self.log["val"]["ref_loss"]]), 5),
             val_ref_mask_loss=round(np.mean([v for v in self.log["val"]["ref_mask_loss"]]), 5),
             val_lang_cls_loss=round(np.mean([v for v in self.log["val"]["lang_cls_loss"]]), 5),
+            val_contrastive_loss=round(np.mean([v for v in self.log["val"]["contrastive_loss"]]), 5),
             val_objectness_loss=round(np.mean([v for v in self.log["val"]["objectness_loss"]]), 5),
             val_kps_loss=round(np.mean([v for v in self.log["val"]["kps_loss"]]), 5),
             val_box_loss=round(np.mean([v for v in self.log["val"]["box_loss"]]), 5),
@@ -644,6 +725,7 @@ class Solver():
             ref_loss=round(self.best["ref_loss"], 5),
             ref_mask_loss=round(self.best["ref_mask_loss"], 5),
             lang_cls_loss=round(self.best["lang_cls_loss"], 5),
+            contrastive_loss=round(self.best["contrastive_loss"], 5),
             objectness_loss=round(self.best["objectness_loss"], 5),
             kps_loss=round(self.best["kps_loss"], 5),
             box_loss=round(self.best["box_loss"], 5),

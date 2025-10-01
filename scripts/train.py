@@ -168,7 +168,11 @@ def get_solver(args, dataloader):
         lr_decay_rate=LR_DECAY_RATE,
         bn_decay_step=BN_DECAY_STEP,
         bn_decay_rate=BN_DECAY_RATE,
-        distributed_rank=args.local_rank if args.distribute else None
+        distributed_rank=args.local_rank if args.distribute else None,
+        use_wandb=getattr(args, 'use_wandb', True),
+        wandb_project=getattr(args, 'wandb_project', None),
+        wandb_run_name=getattr(args, 'wandb_run_name', None),
+        wandb_config=getattr(args, 'wandb_config', None)
     )
     num_params = get_num_params(model)
 

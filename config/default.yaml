@@ -90,6 +90,17 @@ LOSS:
   ref_each_stage: True
   cls_each_stage: True
   ref_criterion: rank
+  # ----- Contrastive (optional) -----
+  use_contrastive_loss: False           # set True to enable contrastive loss
+  contrastive_loss_weight: 0.1          # weight in final loss aggregation
+  contrastive_temperature: 0.07         # softmax temperature
+  contrastive_positive_selection: iou_threshold  # iou_threshold | topk
+  contrastive_iou_threshold: 0.25       # IoU threshold if using iou_threshold
+  contrastive_top_k1: 5                 # top-k positives per text (if using topk)
+  contrastive_top_k2: 32                # top-k negatives per text
+  contrastive_weighting: uniform        # uniform | gaussian
+  contrastive_sigma: 1.0                # sigma for gaussian weighting
+  contrastive_symmetric: False          # compute both text->3d and 3d->text losses
   # ----- Detection -----
   kps_topk: 5
   kps_loss_weight: 0.8

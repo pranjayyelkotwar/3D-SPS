@@ -91,6 +91,40 @@ python batch_load_scannet_data.py
 ### Training
 
 ```shell
+
+### Enabling contrastive loss (optional)
+
+This repo supports an optional contrastive loss between text and 3D proposals.
+
+You can enable it in two ways:
+
+1) Via config file (`config/default.yaml`), under the `LOSS` section:
+
+```
+LOSS:
+  use_contrastive_loss: True
+  contrastive_loss_weight: 0.1
+  contrastive_temperature: 0.07
+  contrastive_positive_selection: iou_threshold   # or: topk
+  contrastive_iou_threshold: 0.25
+  contrastive_top_k1: 5
+  contrastive_top_k2: 32
+  contrastive_weighting: uniform                  # or: gaussian
+  contrastive_sigma: 1.0
+  contrastive_symmetric: False
+```
+
+2) Via CLI flag (overrides config):
+
+```
+python scripts/train.py --use_contrastive_loss
+```
+
+Notes:
+- Metrics and logs will include `contrastive_loss` when enabled.
+- The weight in the aggregated loss is controlled by `LOSS.contrastive_loss_weight`.
+- All contrastive hyperparameters are optional; sensible defaults are used if omitted.
+
 python scripts/train.py --config ./config/default.yaml
 ```
 For more training options (like using preprocessed multiview features), please see details in `default.yaml`.

@@ -22,6 +22,7 @@ class Config():
         self.parser.add_argument("--use_best", action="store_true", help="Use best bounding boxes as outputs.")
         self.parser.add_argument("--scene_id", type=str, help="scene id", default="")
         self.parser.add_argument("--maxpool", action="store_true", help="use max pooling to aggregate features (use majority voting in label projection mode)")
+        self.parser.add_argument("--use_contrastive_loss", action="store_true", help="Enable contrastive loss during training.")
         
     def get_config(self):
         cfgs = self.parser.parse_args()

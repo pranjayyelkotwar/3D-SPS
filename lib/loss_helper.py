@@ -457,9 +457,20 @@ def compute_contrastive_loss(data_dict, num_decoder_layers, args):
         contrastive_loss: pytorch scalar tensor
         data_dict: updated data_dict with contrastive loss info
     """
+    # Infer a device for safe tensor creation
+    def _infer_device():
+        if 'ref_center_label' in data_dict and torch.is_tensor(data_dict['ref_center_label']):
+            return data_dict['ref_center_label'].device
+        for v in data_dict.values():
+            if torch.is_tensor(v):
+                return v.device
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    device = _infer_device()
+
     # Check if contrastive learning is enabled
     if not getattr(args, 'use_contrastive_loss', False):
-        return torch.zeros(1)[0].cuda(), data_dict
+        return torch.zeros((), device=device), data_dict
     
     # Get contrastive loss parameters from args
     contrastive_params = {
@@ -482,7 +493,8 @@ def compute_contrastive_loss(data_dict, num_decoder_layers, args):
     else:
         prefixes = ['last_']  # only final stage
     
-    total_loss = 0.0
+    # Start from a scalar tensor to ensure tensor type even if all prefixes are skipped
+    total_loss = torch.zeros((), device=device)
     contrastive_info = {}
     
     for prefix in prefixes:

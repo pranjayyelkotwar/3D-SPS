@@ -240,6 +240,14 @@ class Solver():
         # add for distributed
         self.distributed_rank = distributed_rank
 
+    def _to_float(self, x):
+        """Safely convert a scalar tensor or python number to float for logging."""
+        try:
+            return x.item() if hasattr(x, 'item') else float(x)
+        except Exception:
+            # Best-effort fallback; shouldn't happen in practice
+            return float(x)
+
 
     def __call__(self, epoch, verbose):
         # setting
@@ -395,15 +403,15 @@ class Solver():
             "iou_rate_0.5": 0
         }
     def _record_log(self, phase):
-        self.log[phase]["loss"].append(self._running_log["loss"].item())
-        self.log[phase]["ref_loss"].append(self._running_log["ref_loss"].item())
-        self.log[phase]["ref_mask_loss"].append(self._running_log["ref_mask_loss"].item())
-        self.log[phase]["lang_cls_loss"].append(self._running_log["lang_cls_loss"].item())
-        self.log[phase]["contrastive_loss"].append(self._running_log["contrastive_loss"].item())
-        self.log[phase]["objectness_loss"].append(self._running_log["objectness_loss"].item())
-        self.log[phase]["kps_loss"].append(self._running_log["kps_loss"].item())
-        self.log[phase]["box_loss"].append(self._running_log["box_loss"].item())
-        self.log[phase]["sem_cls_loss"].append(self._running_log["sem_cls_loss"].item())
+        self.log[phase]["loss"].append(self._to_float(self._running_log["loss"]))
+        self.log[phase]["ref_loss"].append(self._to_float(self._running_log["ref_loss"]))
+        self.log[phase]["ref_mask_loss"].append(self._to_float(self._running_log["ref_mask_loss"]))
+        self.log[phase]["lang_cls_loss"].append(self._to_float(self._running_log["lang_cls_loss"]))
+        self.log[phase]["contrastive_loss"].append(self._to_float(self._running_log["contrastive_loss"]))
+        self.log[phase]["objectness_loss"].append(self._to_float(self._running_log["objectness_loss"]))
+        self.log[phase]["kps_loss"].append(self._to_float(self._running_log["kps_loss"]))
+        self.log[phase]["box_loss"].append(self._to_float(self._running_log["box_loss"]))
+        self.log[phase]["sem_cls_loss"].append(self._to_float(self._running_log["sem_cls_loss"]))
         if not self.args.no_reference:
             self.log[phase]["lang_cls_acc"].append(self._running_log["lang_cls_acc"])
             self.log[phase]["ref_acc"].append(self._running_log["ref_acc"])

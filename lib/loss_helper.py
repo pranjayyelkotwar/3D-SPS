@@ -502,16 +502,31 @@ def compute_contrastive_loss(data_dict, num_decoder_layers, args):
         try:
             # Text embeddings (assumed to be in data_dict)
             if f'{prefix}text_embeddings' in data_dict:
-                text_embeddings = data_dict[f'{prefix}text_embeddings']  # [B, D]
+                text_embeddings = data_dict[f'{prefix}text_embeddings']  # [B, D] or [B, M, D]
             elif 'text_embeddings' in data_dict:
-                text_embeddings = data_dict['text_embeddings']  # [B, D]
+                text_embeddings = data_dict['text_embeddings']  # [B, D] or [B, M, D]
             else:
                 # Skip if no text embeddings available
                 continue
+            # If token-level text provided, pool to sentence-level
+            if text_embeddings.dim() == 3:
+                # Try to use a mask if available
+                mask_key = f'{prefix}lang_mask' if f'{prefix}lang_mask' in data_dict else 'lang_mask'
+                if mask_key in data_dict:
+                    lang_mask = data_dict[mask_key].float()  # [B, M]
+                    denom = torch.clamp(lang_mask.sum(dim=1, keepdim=True), min=1.0)
+                    text_embeddings = (text_embeddings * lang_mask.unsqueeze(-1)).sum(dim=1) / denom  # [B, D]
+                else:
+                    text_embeddings = text_embeddings.mean(dim=1)
+            # L2-normalize for stability if not already
+            text_embeddings = torch.nn.functional.normalize(text_embeddings, dim=-1)
             
             # Proposal embeddings (from model outputs)
             if f'{prefix}proposal_embeddings' in data_dict:
-                proposal_embeddings = data_dict[f'{prefix}proposal_embeddings']  # [N, D]
+                proposal_embeddings = data_dict[f'{prefix}proposal_embeddings']  # [N, D] or [B, K, D]
+                if proposal_embeddings.dim() == 3:
+                    Bp, Kp, Dp = proposal_embeddings.shape
+                    proposal_embeddings = proposal_embeddings.view(Bp*Kp, Dp)
             elif f'{prefix}aggregated_vote_features' in data_dict:
                 proposal_embeddings = data_dict[f'{prefix}aggregated_vote_features']  # [B, K, D]
                 # Reshape to [B*K, D] if needed
@@ -521,6 +536,12 @@ def compute_contrastive_loss(data_dict, num_decoder_layers, args):
             else:
                 # Skip if no proposal embeddings available
                 continue
+
+            # Validate embedding dims before matmul
+            if text_embeddings.dim() != 2 or proposal_embeddings.dim() != 2:
+                raise RuntimeError(f"Contrastive embeddings must be 2D: got text {text_embeddings.shape}, proposals {proposal_embeddings.shape}")
+            if text_embeddings.size(-1) != proposal_embeddings.size(-1):
+                raise RuntimeError(f"Embedding dim mismatch: text D={text_embeddings.size(-1)} vs proposals D={proposal_embeddings.size(-1)}")
             
             # Ground truth boxes
             gt_boxes = data_dict['ref_center_label']  # [B, 3] centers

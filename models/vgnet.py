@@ -220,6 +220,17 @@ class VGNet(nn.Module):
         data_dict['projected_object_feat'] = projected_features['object']  # [B, n_proposal, 512]
         data_dict['projected_lang_feat'] = projected_features['lang']      # [B, n_word, 512]
         
+        # Build a sentence-level text embedding expected by the contrastive loss
+        # Pool over valid tokens using lang_mask, then L2-normalize
+        if 'lang_mask' in data_dict and data_dict['projected_lang_feat'] is not None:
+            mask = data_dict['lang_mask']  # [B, M]
+            proj_lang = data_dict['projected_lang_feat']  # [B, M, 512]
+            # ensure float mask and avoid div by zero
+            mask_f = mask.float()
+            denom = torch.clamp(mask_f.sum(dim=1, keepdim=True), min=1.0)
+            pooled = (proj_lang * mask_f.unsqueeze(-1)).sum(dim=1) / denom  # [B, 512]
+            data_dict['text_embeddings'] = torch.nn.functional.normalize(pooled, dim=-1)
+        
         input_object_feat = object_feat
         input_lang_feat = lang_feat
         for i in range(self.args.num_decoder_layers):
@@ -277,6 +288,16 @@ class VGNet(nn.Module):
             else:
                 input_object_feat = object_feat
                 input_lang_feat = lang_feat
+
+        # After the final decoder stage, align proposal embeddings to the proposals of this stage
+        # so that the contrastive loss can consume them via keys it expects.
+        # object_feat currently holds the last-stage object features: [B, K_final, C]
+        final_proj = self.projector(object_feat=object_feat)
+        last_prop_emb = final_proj['object']  # [B, K_final, 512], already L2-normalized
+        data_dict['last_proposal_embeddings'] = last_prop_emb  # loss helper accepts [B, K, D] and will reshape
+        # Also provide a stage-specific text embedding alias if desired by the loss helper
+        if 'text_embeddings' in data_dict:
+            data_dict['last_text_embeddings'] = data_dict['text_embeddings']
 
         return data_dict
 

@@ -294,7 +294,9 @@ class VGNet(nn.Module):
         # object_feat currently holds the last-stage object features: [B, K_final, C]
         final_proj = self.projector(object_feat=object_feat)
         last_prop_emb = final_proj['object']  # [B, K_final, 512], already L2-normalized
-        data_dict['last_proposal_embeddings'] = last_prop_emb  # loss helper accepts [B, K, D] and will reshape
+        # Loss helper expects 2D [N, D]. Flatten batch and proposals
+        B_, K_, D_ = last_prop_emb.shape
+        data_dict['last_proposal_embeddings'] = last_prop_emb.reshape(B_ * K_, D_)
         # Also provide a stage-specific text embedding alias if desired by the loss helper
         if 'text_embeddings' in data_dict:
             data_dict['last_text_embeddings'] = data_dict['text_embeddings']

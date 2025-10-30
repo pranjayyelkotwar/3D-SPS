@@ -45,6 +45,11 @@ def compute_kps_loss(data_dict, topk, args):
     K2 = gt_center.shape[1]
 
     point_instance_label = data_dict['point_instance_label']  # B, num_points
+    # Safety: clamp seed indices into valid range to avoid device-side assert
+    num_points = point_instance_label.shape[1]
+    if seed_inds.min() < 0 or seed_inds.max() >= num_points:
+        print(f"[warn] seed_inds out of range: min={seed_inds.min().item()}, max={seed_inds.max().item()}, num_points={num_points}")
+        seed_inds = seed_inds.clamp(min=0, max=num_points - 1)
     object_assignment = torch.gather(point_instance_label, 1, seed_inds)  # B, num_seed
     object_assignment[object_assignment < 0] = K2 - 1  # set background points to the last gt bbox
     object_assignment_one_hot = torch.zeros((B, K, K2)).to(seed_xyz.device)
@@ -131,7 +136,17 @@ def compute_objectness_loss(data_dict, num_decoder_layers, args):
     B = seed_inds.shape[0]
     K = query_points_sample_inds.shape[1]
     K2 = gt_center.shape[1]
+    # Safety: clamp seed indices
+    num_points = data_dict['point_obj_mask'].shape[1]
+    if seed_inds.min() < 0 or seed_inds.max() >= num_points:
+        print(f"[warn] seed_inds out of range in objectness: min={seed_inds.min().item()}, max={seed_inds.max().item()}, num_points={num_points}")
+        seed_inds = seed_inds.clamp(min=0, max=num_points - 1)
     seed_obj_gt = torch.gather(data_dict['point_obj_mask'], 1, seed_inds)  # B,num_seed
+    # Safety: clamp query_points_sample_inds
+    num_seed = seed_inds.shape[1]
+    if query_points_sample_inds.min() < 0 or query_points_sample_inds.max() >= num_seed:
+        print(f"[warn] query_points_sample_inds out of range: min={query_points_sample_inds.min().item()}, max={query_points_sample_inds.max().item()}, num_seed={num_seed}")
+        query_points_sample_inds = query_points_sample_inds.clamp(min=0, max=num_seed - 1)
     query_points_obj_gt = torch.gather(seed_obj_gt, 1, query_points_sample_inds)  # B, query_points
     seed_instance_label = torch.gather(data_dict['point_instance_label'], 1, seed_inds)  # B,num_seed
     query_points_instance_label = torch.gather(seed_instance_label, 1, query_points_sample_inds)  # B,query_points
@@ -140,6 +155,11 @@ def compute_objectness_loss(data_dict, num_decoder_layers, args):
     if 'ref_query_points_sample_inds' in data_dict.keys():
         ref_query_points_sample_inds = data_dict['ref_query_points_sample_inds'].long()
         K = ref_query_points_sample_inds.shape[1]
+        # Safety: clamp ref indices
+        num_queries = query_points_obj_gt.shape[1]
+        if ref_query_points_sample_inds.min() < 0 or ref_query_points_sample_inds.max() >= num_queries:
+            print(f"[warn] ref_query_points_sample_inds out of range: min={ref_query_points_sample_inds.min().item()}, max={ref_query_points_sample_inds.max().item()}, num_queries={num_queries}")
+            ref_query_points_sample_inds = ref_query_points_sample_inds.clamp(min=0, max=num_queries - 1)
         query_points_obj_gt = torch.gather(query_points_obj_gt, 1, ref_query_points_sample_inds)
         query_points_instance_label = torch.gather(query_points_instance_label, 1, ref_query_points_sample_inds)
         query_points_ref_gt = torch.gather(query_points_ref_gt, 1, ref_query_points_sample_inds)
@@ -147,6 +167,10 @@ def compute_objectness_loss(data_dict, num_decoder_layers, args):
     # Set assignment
     object_assignment = query_points_instance_label  # (B,K) with values in 0,1,...,K2-1
     object_assignment[object_assignment < 0] = K2 - 1  # set background points to the last gt bbox
+    # Safety: clamp object_assignment into [0, K2-1]
+    if object_assignment.min() < 0 or object_assignment.max() >= K2:
+        print(f"[warn] object_assignment out of range before clamp: min={object_assignment.min().item()}, max={object_assignment.max().item()}, K2={K2}")
+        object_assignment = object_assignment.clamp(min=0, max=K2 - 1)
     # objectness_mask = torch.ones((B, K)).cuda()
     for i, prefix in enumerate(prefixes):
         if i > 0 and f'{prefixes[i-1]}ref_mask_inds' in data_dict.keys():
@@ -221,6 +245,11 @@ def compute_box_and_sem_cls_loss(data_dict, config, num_decoder_layers, args,
     for prefix in prefixes:
         object_assignment = data_dict[f'{prefix}object_assignment']
         batch_size = object_assignment.shape[0]
+        K2 = data_dict['center_label'].shape[1]
+        # Safety: clamp into [0, K2-1]
+        if object_assignment.min() < 0 or object_assignment.max() >= K2:
+            print(f"[warn] {prefix}object_assignment out of range: min={object_assignment.min().item()}, max={object_assignment.max().item()}, K2={K2}")
+            object_assignment = object_assignment.clamp(min=0, max=K2 - 1)
         # Compute center loss
         pred_center = data_dict[f'{prefix}center']
         gt_center = data_dict['center_label'][:, :, 0:3]
@@ -243,6 +272,10 @@ def compute_box_and_sem_cls_loss(data_dict, config, num_decoder_layers, args,
         # Compute heading loss
         heading_class_label = torch.gather(data_dict['heading_class_label'], 1,
                                            object_assignment)  # select (B,K) from (B,K2)
+        # Safety: clamp heading class labels into valid range
+        if heading_class_label.min() < 0 or heading_class_label.max() >= num_heading_bin:
+            print(f"[warn] {prefix}heading_class_label out of range: min={heading_class_label.min().item()}, max={heading_class_label.max().item()}, num_heading_bin={num_heading_bin}")
+            heading_class_label = heading_class_label.clamp(min=0, max=num_heading_bin - 1)
         criterion_heading_class = nn.CrossEntropyLoss(reduction='none')
         heading_class_loss = criterion_heading_class(data_dict[f'{prefix}heading_scores'].transpose(2, 1),
                                                      heading_class_label)  # (B,K)
@@ -295,6 +328,10 @@ def compute_box_and_sem_cls_loss(data_dict, config, num_decoder_layers, args,
         else:
             size_class_label = torch.gather(data_dict['size_class_label'], 1,
                                             object_assignment)  # select (B,K) from (B,K2)
+            # Safety: clamp size class labels into valid range
+            if size_class_label.min() < 0 or size_class_label.max() >= num_size_cluster:
+                print(f"[warn] {prefix}size_class_label out of range: min={size_class_label.min().item()}, max={size_class_label.max().item()}, num_size_cluster={num_size_cluster}")
+                size_class_label = size_class_label.clamp(min=0, max=num_size_cluster - 1)
             criterion_size_class = nn.CrossEntropyLoss(reduction='none')
             size_class_loss = criterion_size_class(data_dict[f'{prefix}size_scores'].transpose(2, 1),
                                                    size_class_label)  # (B,K)
@@ -335,6 +372,10 @@ def compute_box_and_sem_cls_loss(data_dict, config, num_decoder_layers, args,
 
         # 3.4 Semantic cls loss
         sem_cls_label = torch.gather(data_dict['sem_cls_label'], 1, object_assignment)  # select (B,K) from (B,K2)
+        # Safety: clamp semantic class labels into valid range
+        if sem_cls_label.min() < 0 or sem_cls_label.max() >= num_class:
+            print(f"[warn] {prefix}sem_cls_label out of range: min={sem_cls_label.min().item()}, max={sem_cls_label.max().item()}, num_class={num_class}")
+            sem_cls_label = sem_cls_label.clamp(min=0, max=num_class - 1)
         criterion_sem_cls = nn.CrossEntropyLoss(reduction='none')
         sem_cls_loss = criterion_sem_cls(data_dict[f'{prefix}sem_cls_scores'].transpose(2, 1), sem_cls_label)  # (B,K)
         sem_cls_loss = torch.sum(sem_cls_loss * objectness_label) / (torch.sum(objectness_label) + 1e-6)
@@ -495,6 +536,7 @@ def compute_contrastive_loss(data_dict, num_decoder_layers, args):
     
     # Start from a scalar tensor to ensure tensor type even if all prefixes are skipped
     total_loss = torch.zeros((), device=device)
+    valid_count = 0
     contrastive_info = {}
     
     for prefix in prefixes:
@@ -587,6 +629,7 @@ def compute_contrastive_loss(data_dict, num_decoder_layers, args):
             )
             
             total_loss += loss
+            valid_count += 1
             contrastive_info[f'{prefix}contrastive_info'] = info
             
         except (KeyError, RuntimeError) as e:
@@ -594,9 +637,11 @@ def compute_contrastive_loss(data_dict, num_decoder_layers, args):
             print(f"Warning: Skipping contrastive loss for {prefix} due to missing data: {e}")
             continue
     
-    # Average over prefixes
-    if len(prefixes) > 0:
-        total_loss = total_loss / len(prefixes)
+    # Average over valid prefixes only
+    if valid_count > 0:
+        total_loss = total_loss / valid_count
+    else:
+        total_loss = torch.zeros((), device=device)
     
     # Store contrastive loss info in data_dict for monitoring
     data_dict['contrastive_info'] = contrastive_info
